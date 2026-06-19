@@ -5,7 +5,8 @@
       "name": "optionexplainer",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--", "--port", "5174"],
-      "port": 5174
+      "port": 5174,
+      "autoPort": false
     }
   ]
 }

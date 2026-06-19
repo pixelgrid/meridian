@@ -45,6 +45,7 @@ const NAV_SECTIONS: NavSection[] = [
           { to: '/gamma-scalping', label: 'Gamma Scalping' },
           { to: '/put-write', label: 'Systematic Put-Write' },
           { to: '/zero-cost-collar', label: 'Zero-Cost Collar' },
+          { to: '/meic', label: 'MEIC 0DTE (Tammy Chambless)' },
         ],
       },
     ],

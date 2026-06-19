@@ -38,6 +38,7 @@ import { BondMacro } from './pages/BondMacro';
 import { BondGlossary } from './pages/BondGlossary';
 import { TradrSignals } from './pages/TradrSignals';
 import { ArbitrageAtlas } from './pages/ArbitrageAtlas';
+import { MEIC as MEICPage } from './pages/MEIC';
 
 export default function App() {
   return (
@@ -82,6 +83,7 @@ export default function App() {
         <Route path="/bond-glossary" element={<BondGlossary />} />
         <Route path="/tradr" element={<TradrSignals />} />
         <Route path="/arbitrage-atlas" element={<ArbitrageAtlas />} />
+        <Route path="/meic" element={<MEICPage />} />
       </Routes>
     </HashRouter>
   );
