@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import {
-  AreaChart, Area, LineChart, Line, BarChart, Bar,
+  AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, Cell,
 } from 'recharts';
@@ -87,7 +87,7 @@ function IronCondorDiagram({ spxSpot, callShort, callLong, putShort, putLong, cr
         <CartesianGrid {...CS.grid} />
         <XAxis dataKey="price" {...CS.ax} label={{ value: 'SPX Price at Expiry', position: 'insideBottom', offset: -2, fill: 'var(--text-muted)', fontSize: 11 }} />
         <YAxis {...CS.ax} tickFormatter={v => `$${v}`} />
-        <Tooltip {...CS.tip} formatter={(v: number) => [`$${v}`, 'P&L']} labelFormatter={l => `SPX @ ${l}`} />
+        <Tooltip {...CS.tip} formatter={(v: unknown) => [`$${v}`, 'P&L']} labelFormatter={l => `SPX @ ${l}`} />
         <ReferenceLine y={0} stroke="var(--border)" strokeWidth={1.5} />
         <ReferenceLine x={spxSpot} stroke="#6366f1" strokeDasharray="4 4" label={{ value: 'Spot', fill: '#6366f1', fontSize: 10, position: 'top' }} />
         <Area type="monotone" dataKey="pnl" stroke="#10b981" strokeWidth={2}
@@ -471,7 +471,7 @@ export function MEIC() {
                   <CartesianGrid {...CS.grid} />
                   <XAxis dataKey="entry" {...CS.ax} />
                   <YAxis domain={[50, 70]} {...CS.ax} tickFormatter={v => `${v}%`} />
-                  <Tooltip {...CS.tip} formatter={(v: number, n: string) => [n === 'winRate' ? `${v}%` : `$${v}`, n === 'winRate' ? 'Win Rate' : 'Avg Credit']} />
+                  <Tooltip {...CS.tip} formatter={(v: unknown, n: unknown) => [n === 'winRate' ? `${v}%` : `$${v}`, n === 'winRate' ? 'Win Rate' : 'Avg Credit']} />
                   <Bar dataKey="winRate" fill="#6366f1" radius={[4, 4, 0, 0]} name="winRate" />
                 </BarChart>
               </ResponsiveContainer>
@@ -611,7 +611,7 @@ export function MEIC() {
                     <CartesianGrid {...CS.grid} />
                     <XAxis dataKey="month" {...CS.ax} />
                     <YAxis {...CS.ax} tickFormatter={v => `${v}%`} />
-                    <Tooltip {...CS.tip} formatter={(v: number) => [`${v}%`, 'Return']} />
+                    <Tooltip {...CS.tip} formatter={(v: unknown) => [`${v}%`, 'Return']} />
                     <ReferenceLine y={0} stroke="var(--border)" />
                     <Bar dataKey="result" radius={[4, 4, 0, 0]}>
                       {monthlyData.map((entry, index) => (
@@ -630,7 +630,7 @@ export function MEIC() {
                     <CartesianGrid {...CS.grid} />
                     <XAxis dataKey="year" {...CS.ax} />
                     <YAxis {...CS.ax} tickFormatter={v => `${v}%`} />
-                    <Tooltip {...CS.tip} formatter={(v: number) => [`${v}%`, 'Double-Stop Days']} />
+                    <Tooltip {...CS.tip} formatter={(v: unknown) => [`${v}%`, 'Double-Stop Days']} />
                     <Bar dataKey="freq" fill="#ef4444" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
