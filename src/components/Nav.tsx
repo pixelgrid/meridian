@@ -18,6 +18,7 @@ const NAV_SECTIONS: NavSection[] = [
         heading: 'Strategies & Guides',
         links: [
           { to: '/strategies', label: 'Strategy Library' },
+          { to: '/strategy-builder', label: 'Strategy Builder' },
           { to: '/wheel', label: 'The Wheel' },
           { to: '/pmcc', label: "Poor Man's Covered Call" },
           { to: '/risk', label: 'Risk Management' },
@@ -45,6 +46,7 @@ const NAV_SECTIONS: NavSection[] = [
           { to: '/gamma-scalping', label: 'Gamma Scalping' },
           { to: '/put-write', label: 'Systematic Put-Write' },
           { to: '/zero-cost-collar', label: 'Zero-Cost Collar' },
+          { to: '/calendar-spreads', label: 'Calendar & Diagonal Spreads' },
           { to: '/meic', label: 'MEIC 0DTE (Tammy Chambless)' },
         ],
       },

@@ -39,6 +39,8 @@ import { BondGlossary } from './pages/BondGlossary';
 import { TradrSignals } from './pages/TradrSignals';
 import { ArbitrageAtlas } from './pages/ArbitrageAtlas';
 import { MEIC as MEICPage } from './pages/MEIC';
+import { CalendarSpreads } from './pages/CalendarSpreads';
+import { StrategyBuilder } from './pages/StrategyBuilder';
 
 export default function App() {
   return (
@@ -84,6 +86,8 @@ export default function App() {
         <Route path="/tradr" element={<TradrSignals />} />
         <Route path="/arbitrage-atlas" element={<ArbitrageAtlas />} />
         <Route path="/meic" element={<MEICPage />} />
+        <Route path="/calendar-spreads" element={<CalendarSpreads />} />
+        <Route path="/strategy-builder" element={<StrategyBuilder />} />
       </Routes>
     </HashRouter>
   );
