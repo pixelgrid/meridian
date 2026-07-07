@@ -41,6 +41,7 @@ import { ArbitrageAtlas } from './pages/ArbitrageAtlas';
 import { MEIC as MEICPage } from './pages/MEIC';
 import { CalendarSpreads } from './pages/CalendarSpreads';
 import { StrategyBuilder } from './pages/StrategyBuilder';
+import { StrategyIntents } from './pages/StrategyIntents';
 
 export default function App() {
   return (
@@ -88,6 +89,7 @@ export default function App() {
         <Route path="/meic" element={<MEICPage />} />
         <Route path="/calendar-spreads" element={<CalendarSpreads />} />
         <Route path="/strategy-builder" element={<StrategyBuilder />} />
+        <Route path="/strategy-intents" element={<StrategyIntents />} />
       </Routes>
     </HashRouter>
   );

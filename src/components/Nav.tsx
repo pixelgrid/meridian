@@ -19,6 +19,7 @@ const NAV_SECTIONS: NavSection[] = [
         links: [
           { to: '/strategies', label: 'Strategy Library' },
           { to: '/strategy-builder', label: 'Strategy Builder' },
+          { to: '/strategy-intents', label: 'Strategies by Intention' },
           { to: '/wheel', label: 'The Wheel' },
           { to: '/pmcc', label: "Poor Man's Covered Call" },
           { to: '/risk', label: 'Risk Management' },
