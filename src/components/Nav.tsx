@@ -48,6 +48,7 @@ const NAV_SECTIONS: NavSection[] = [
           { to: '/put-write', label: 'Systematic Put-Write' },
           { to: '/zero-cost-collar', label: 'Zero-Cost Collar' },
           { to: '/calendar-spreads', label: 'Calendar & Diagonal Spreads' },
+          { to: '/spx-income-engine', label: 'SPX Weekly Income Engine' },
           { to: '/meic', label: 'MEIC 0DTE (Tammy Chambless)' },
         ],
       },

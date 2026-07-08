@@ -42,6 +42,7 @@ import { MEIC as MEICPage } from './pages/MEIC';
 import { CalendarSpreads } from './pages/CalendarSpreads';
 import { StrategyBuilder } from './pages/StrategyBuilder';
 import { StrategyIntents } from './pages/StrategyIntents';
+import { SPXIncomeEngine } from './pages/SPXIncomeEngine';
 
 export default function App() {
   return (
@@ -90,6 +91,7 @@ export default function App() {
         <Route path="/calendar-spreads" element={<CalendarSpreads />} />
         <Route path="/strategy-builder" element={<StrategyBuilder />} />
         <Route path="/strategy-intents" element={<StrategyIntents />} />
+        <Route path="/spx-income-engine" element={<SPXIncomeEngine />} />
       </Routes>
     </HashRouter>
   );
