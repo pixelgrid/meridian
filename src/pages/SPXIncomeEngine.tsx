@@ -6,6 +6,10 @@ import { normCdf } from '../lib/blackScholes';
 const R = 0.04; // risk-free
 const MULT = 100;
 const TF = 7 / 365, TB = 14 / 365;
+const T0 = 1 / 365;
+const FRICTION_0DTE = 0.65; // gamma slippage + fills eat ~35% of theoretical 0DTE edge
+
+const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 
 // Acklam approximation of the inverse normal CDF
 function normInv(prob: number): number {
@@ -68,8 +72,13 @@ interface BuildParams {
 
 interface StratLeg { side: 'SELL' | 'BUY'; type: 'PUT' | 'CALL'; strike: number; exp: string }
 
+type Bucket = 'WEEKLY' | '0DTE';
+
 interface Strategy {
   key: string; name: string; dteLabel: string;
+  bucket: Bucket;
+  T: number;      // horizon in years — used for POP integration
+  sigma: number;  // decimal IV at that horizon
   legs: StratLeg[];
   creditDebit: { label: string; val: number };
   maxRisk: number; contracts: number; popModel: number | null;
@@ -94,7 +103,7 @@ function buildPCS({ S, ivF, Tf, pop, capital, strikeStep, mult }: BuildParams): 
   const winP = Math.min(0.96, popModel + 0.05); // managed at 50% TP
   const evPerCt = winP * 0.5 * credit * mult - (1 - winP) * 2.0 * credit * mult;
   return {
-    key: 'pcs', name: 'Put Credit Spread', dteLabel: '7 DTE',
+    key: 'pcs', name: 'Put Credit Spread', dteLabel: '7 DTE', bucket: 'WEEKLY', T: Tf, sigma: ivF,
     legs: [
       { side: 'SELL', type: 'PUT', strike: Ks, exp: 'front (7d)' },
       { side: 'BUY', type: 'PUT', strike: Kl, exp: 'front (7d)' },
@@ -133,7 +142,7 @@ function buildIC({ S, ivF, Tf, pop, capital, strikeStep, mult }: BuildParams): S
   const winP = Math.min(0.94, popModel + 0.08);
   const evPerCt = winP * 0.5 * credit * mult - (1 - winP) * 2.0 * credit * mult;
   return {
-    key: 'ic', name: 'Iron Condor (call-skewed)', dteLabel: '7 DTE',
+    key: 'ic', name: 'Iron Condor (call-skewed)', dteLabel: '7 DTE', bucket: 'WEEKLY', T: Tf, sigma: ivF,
     legs: [
       { side: 'SELL', type: 'PUT', strike: Kps, exp: 'front (7d)' },
       { side: 'BUY', type: 'PUT', strike: Kpl, exp: 'front (7d)' },
@@ -172,7 +181,7 @@ function buildDC({ S, ivF, ivB, Tf, Tb, capital, strikeStep, mult }: BuildParams
   const winP = 0.68;
   const evPerCt = winP * 0.20 * maxRisk - (1 - winP) * 0.25 * maxRisk;
   return {
-    key: 'dc', name: 'Double Calendar', dteLabel: '7 / 14 DTE',
+    key: 'dc', name: 'Double Calendar', dteLabel: '7 / 14 DTE', bucket: 'WEEKLY', T: Tf, sigma: ivF,
     legs: [
       { side: 'SELL', type: 'PUT', strike: Kp, exp: 'front (7d)' },
       { side: 'BUY', type: 'PUT', strike: Kp, exp: 'back (14d)' },
@@ -208,7 +217,7 @@ function buildDD({ S, ivF, ivB, Tf, Tb, capital, strikeStep, mult }: BuildParams
   const winP = 0.70;
   const evPerCt = winP * 0.15 * maxRisk - (1 - winP) * 0.20 * maxRisk;
   return {
-    key: 'dd', name: 'Double Diagonal', dteLabel: '7 / 14 DTE',
+    key: 'dd', name: 'Double Diagonal', dteLabel: '7 / 14 DTE', bucket: 'WEEKLY', T: Tf, sigma: ivF,
     legs: [
       { side: 'SELL', type: 'PUT', strike: Kps, exp: 'front (7d)' },
       { side: 'BUY', type: 'PUT', strike: Kpl, exp: 'back (14d)' },
@@ -224,6 +233,125 @@ function buildDD({ S, ivF, ivB, Tf, Tb, capital, strikeStep, mult }: BuildParams
     evWeekly: (contracts > 0 ? contracts : 0) * evPerCt,
     breakevens: null, payoff,
     notes: 'Wider, flatter tent than the DC and less vega-fragile — the regime bridge when VIX sits 18–24 and calendars feel exposed to crush.',
+  };
+}
+
+/* ============ 0DTE BUILDERS ============ */
+// All EV figures carry the FRICTION_0DTE haircut — never display raw BS
+// expectancy for 0DTE. evWeekly = per-trade EV × contracts × 5 daily entries,
+// so 0DTE and weekly structures compare apples-to-apples.
+
+interface Build0Params {
+  S: number; iv0: number; T0: number; pop: number; capital: number; strikeStep: number; mult: number;
+}
+
+function build0PCS({ S, iv0, T0: t0, pop, capital, strikeStep, mult }: Build0Params): Strategy {
+  const shortDelta = clamp(1 - pop, 0.04, 0.35);
+  const width = strikeStep >= 5 ? 30 : 3;
+  const Ks = roundTo(deltaToStrike(S, iv0, t0, shortDelta, 'put'), strikeStep);
+  const Kl = Ks - width;
+  const credit = Math.max(0.05, bsPrice(S, Ks, t0, iv0, 'put') - bsPrice(S, Kl, t0, iv0, 'put'));
+  const maxRisk = (width - credit) * mult;
+  const be = Ks - credit;
+  const popModel = probAbove(S, be, t0, iv0);
+  const contracts = Math.floor(capital / maxRisk);
+  const evPerTrade = (popModel * credit - (1 - popModel) * 2 * credit) * mult * FRICTION_0DTE;
+  return {
+    key: 'pcs0', name: '0DTE Put Credit Spread', dteLabel: '0 DTE', bucket: '0DTE', T: t0, sigma: iv0,
+    legs: [
+      { side: 'SELL', type: 'PUT', strike: Ks, exp: 'today' },
+      { side: 'BUY', type: 'PUT', strike: Kl, exp: 'today' },
+    ],
+    creditDebit: { label: 'Credit', val: credit * mult },
+    maxRisk, contracts, popModel,
+    tp: 'Hold to close — SPX is cash-settled: let it expire or buy back ≤ $0.05',
+    sl: `Exit at 2× credit (${fmt$(2 * credit * mult)}/ct) or short strike touched — no averaging down`,
+    timeExit: 'Hard flat 15:50 ET',
+    entry: 'Enter 09:35–10:30 ET after the opening range; one entry/day, fixed size; skip FOMC/CPI/NFP and gap opens > 0.8%',
+    evWeekly: (contracts > 0 ? contracts : 0) * evPerTrade * 5,
+    breakevens: [be],
+    payoff: (grid) => grid.map((s) => (credit - Math.max(Ks - s, 0) + Math.max(Kl - s, 0)) * mult),
+    notes: `Intraday VRP harvest. EV shown after a ${Math.round((1 - FRICTION_0DTE) * 100)}% friction haircut for gamma slippage and fills — raw BS expectancy overstates 0DTE edge.`,
+  };
+}
+
+function build0IC({ S, iv0, T0: t0, pop, capital, strikeStep, mult }: Build0Params): Strategy {
+  const perSide = clamp((1 - pop) / 2, 0.03, 0.30);
+  const putD = clamp(perSide * 1.1, 0.03, 0.35);   // put side carries the edge
+  const callD = clamp(perSide * 0.75, 0.02, 0.35); // call side is the weaker edge — skewed further OTM
+  const width = strikeStep >= 5 ? 30 : 3;
+  const Kps = roundTo(deltaToStrike(S, iv0, t0, putD, 'put'), strikeStep);
+  const Kpl = Kps - width;
+  const Kcs = roundTo(deltaToStrike(S, iv0, t0, callD, 'call'), strikeStep);
+  const Kcl = Kcs + width;
+  const credit = Math.max(
+    0.05,
+    bsPrice(S, Kps, t0, iv0, 'put') - bsPrice(S, Kpl, t0, iv0, 'put') +
+    bsPrice(S, Kcs, t0, iv0, 'call') - bsPrice(S, Kcl, t0, iv0, 'call')
+  );
+  const maxRisk = (width - credit) * mult;
+  const beP = Kps - credit, beC = Kcs + credit;
+  const popModel = Math.max(0, probAbove(S, beP, t0, iv0) - probAbove(S, beC, t0, iv0));
+  const contracts = Math.floor(capital / maxRisk);
+  const evPerTrade = (popModel * credit - (1 - popModel) * 2 * credit) * mult * FRICTION_0DTE;
+  return {
+    key: 'ic0', name: '0DTE Iron Condor', dteLabel: '0 DTE', bucket: '0DTE', T: t0, sigma: iv0,
+    legs: [
+      { side: 'SELL', type: 'PUT', strike: Kps, exp: 'today' },
+      { side: 'BUY', type: 'PUT', strike: Kpl, exp: 'today' },
+      { side: 'SELL', type: 'CALL', strike: Kcs, exp: 'today' },
+      { side: 'BUY', type: 'CALL', strike: Kcl, exp: 'today' },
+    ],
+    creditDebit: { label: 'Credit', val: credit * mult },
+    maxRisk, contracts, popModel,
+    tp: `TP at 50% of credit (${fmt$(0.5 * credit * mult)}/ct) or let expire`,
+    sl: 'Stop each side at 2× that side\'s credit',
+    timeExit: 'Hard flat 15:50 ET',
+    entry: 'Enter 09:35–11:00 ET; call side deliberately further OTM',
+    evWeekly: (contracts > 0 ? contracts : 0) * evPerTrade * 5,
+    breakevens: [beP, beC],
+    payoff: (grid) => grid.map((s) =>
+      (credit - Math.max(Kps - s, 0) + Math.max(Kpl - s, 0) - Math.max(s - Kcs, 0) + Math.max(s - Kcl, 0)) * mult),
+    notes: 'Intraday range harvest, delta-neutral at entry. EV after the 0DTE friction haircut — both sides managed independently.',
+  };
+}
+
+function build0IB({ S, iv0, T0: t0, capital, strikeStep, mult }: Omit<Build0Params, 'pop'>): Strategy {
+  const em0 = S * iv0 * Math.sqrt(t0);
+  const K = roundTo(S, strikeStep);
+  const wing = strikeStep >= 5
+    ? Math.max(30, roundTo(1.6 * em0, strikeStep))
+    : Math.max(3, roundTo(1.6 * em0, strikeStep));
+  const credit = Math.max(
+    0.05,
+    bsPrice(S, K, t0, iv0, 'put') + bsPrice(S, K, t0, iv0, 'call')
+    - bsPrice(S, K - wing, t0, iv0, 'put') - bsPrice(S, K + wing, t0, iv0, 'call')
+  );
+  const maxRisk = (wing - credit) * mult;
+  const beP = K - credit, beC = K + credit;
+  const popModel = Math.max(0, probAbove(S, beP, t0, iv0) - probAbove(S, beC, t0, iv0));
+  const contracts = Math.floor(capital / maxRisk);
+  // empirical: ~78% of entries hit a 25% TP; losers average ~70% of credit with a 100%-of-credit stop
+  const evPerTrade = (0.78 * 0.25 * credit - 0.22 * 0.70 * credit) * mult * FRICTION_0DTE;
+  return {
+    key: 'ib0', name: '0DTE Iron Butterfly', dteLabel: '0 DTE', bucket: '0DTE', T: t0, sigma: iv0,
+    legs: [
+      { side: 'BUY', type: 'PUT', strike: K - wing, exp: 'today' },
+      { side: 'SELL', type: 'PUT', strike: K, exp: 'today' },
+      { side: 'SELL', type: 'CALL', strike: K, exp: 'today' },
+      { side: 'BUY', type: 'CALL', strike: K + wing, exp: 'today' },
+    ],
+    creditDebit: { label: 'Credit', val: credit * mult },
+    maxRisk, contracts, popModel,
+    tp: `Mandatory TP at 25% of credit (${fmt$(0.25 * credit * mult)}/ct)`,
+    sl: `SL at 100% of credit (${fmt$(credit * mult)}/ct) — MEIC variant: stop each side at its own credit`,
+    timeExit: 'Hard flat 15:45 ET',
+    entry: 'Enter 10:00–12:00 ET after the open settles; wants quiet mean-reverting days: VIX 15–25, opening range < 0.5%, no events',
+    evWeekly: (contracts > 0 ? contracts : 0) * evPerTrade * 5,
+    breakevens: [beP, beC],
+    payoff: (grid) => grid.map((s) =>
+      (credit - Math.max(K - s, 0) - Math.max(s - K, 0) + Math.max(K - wing - s, 0) + Math.max(s - (K + wing), 0)) * mult),
+    notes: 'Raw expiry POP is low — that\'s honest. The edge lives in the mandatory 25% TP, not in holding the tent to the close. EV uses empirical TP/SL hit rates × friction.',
   };
 }
 
@@ -268,6 +396,25 @@ function scoreAll(vix: number, slopePct: number, pop: number): Record<string, nu
   if (slopePct > 0.5) dd += 10;
   if (vix > 27) dd -= 18;
   s.dd = dd;
+  // 0DTE structures must degrade faster than weeklies when VIX runs hot —
+  // trend days destroy intraday sellers before they can manage.
+  let pcs0 = 58;
+  if (vix >= 13 && vix <= 28) pcs0 += 15; else if (vix < 11) pcs0 -= 12;
+  if (vix >= 32) pcs0 -= 22;
+  if (pop >= 0.80) pcs0 += 6;
+  s.pcs0 = pcs0;
+  let ic0 = 52;
+  if (vix >= 14 && vix <= 24) ic0 += 13;
+  if (vix > 28) ic0 -= 20;
+  if (pop >= 0.65 && pop <= 0.85) ic0 += 6;
+  s.ic0 = ic0;
+  let ib0 = 46;
+  if (vix >= 15 && vix <= 25) ib0 += 14;
+  if (vix < 12) ib0 -= 12; // credit too thin
+  if (vix > 28) ib0 -= 18;
+  if (pop <= 0.70) ib0 += 6;
+  if (pop > 0.85) ib0 -= 14; // a fly cannot deliver 85% POP
+  s.ib0 = ib0;
   Object.keys(s).forEach((k) => (s[k] = Math.max(5, Math.min(98, s[k]))));
   return s;
 }
@@ -372,10 +519,12 @@ export function SPXIncomeEngine() {
   const [spot, setSpot] = useState(6200);
   const [ivF, setIvF] = useState(13.5);   // front IV %
   const [ivB, setIvB] = useState(14.5);   // back IV %
+  const [iv0, setIv0] = useState(12.0);   // 0DTE IV %
   const [vix, setVix] = useState(15.5);
   const [capital, setCapital] = useState(20000);
-  const [yieldT, setYieldT] = useState(0.8);  // % weekly
+  const [yieldT, setYieldT] = useState(0.8);  // % weekly — single source of truth for both yield sliders
   const [popT, setPopT] = useState(78);       // %
+  const [view, setView] = useState<'ALL' | Bucket>('ALL');
 
   const [fetching, setFetching] = useState(false);
   const [fetchMsg, setFetchMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -412,40 +561,49 @@ export function SPXIncomeEngine() {
   const out = useMemo(() => {
     const strikeStep = und === 'SPX' ? 5 : 1;
     const S = spot;
-    const f = ivF / 100, b = ivB / 100, pop = popT / 100;
+    const f = ivF / 100, b = ivB / 100, i0 = iv0 / 100, pop = popT / 100;
     const slopePct = ivF - ivB; // in vol points; >0 = backwardation
     const regime = classifyRegime(vix, slopePct);
     const scores = scoreAll(vix, slopePct, pop);
     const common: BuildParams = { S, ivF: f, ivB: b, Tf: TF, Tb: TB, pop, capital, strikeStep, mult: MULT };
+    const common0: Build0Params = { S, iv0: i0, T0, pop, capital, strikeStep, mult: MULT };
     const em = S * f * Math.sqrt(TF);
-    // payoff grid ±2.2σ
+    const em0 = S * i0 * Math.sqrt(T0);
+    // shared payoff grid ±2.2σ of the 7-day move — 0DTE tents render narrower
+    // on the same axis, which is intentional and informative
     const grid: number[] = [];
     const lo = S - 2.2 * em, hi = S + 2.2 * em, n = 120;
     for (let i = 0; i <= n; i++) grid.push(lo + ((hi - lo) * i) / n);
 
-    const strategies: ScoredStrategy[] = [buildPCS(common), buildIC(common), buildDC(common), buildDD(common)]
+    const strategies: ScoredStrategy[] = [
+      buildPCS(common), buildIC(common), buildDC(common), buildDD(common),
+      build0PCS(common0), build0IC(common0), build0IB(common0),
+    ]
       .map((st) => ({ ...st, score: scores[st.key] }))
       .sort((a, b2) => b2.score - a.score)
       .map((st) => {
         const pl = st.payoff(grid);
-        // model POP for tent strategies from the payoff grid
+        // model POP for tent strategies from the payoff grid, integrated at
+        // each strategy's own (T, sigma) horizon
         let popFinal = st.popModel ?? 0;
         if (st.popModel == null) {
           let prob = 0;
           for (let i = 0; i < grid.length - 1; i++) {
-            if (pl[i] > 0) prob += probAbove(S, grid[i], TF, f) - probAbove(S, grid[i + 1], TF, f);
+            if (pl[i] > 0) prob += probAbove(S, grid[i], st.T, st.sigma) - probAbove(S, grid[i + 1], st.T, st.sigma);
           }
           popFinal = Math.max(0, Math.min(0.99, prob));
         }
         return { ...st, pl, popFinal };
       });
 
-    return { regime, strategies, em, grid, slopePct };
-  }, [und, spot, ivF, ivB, vix, capital, popT]);
+    return { regime, strategies, em, em0, grid, slopePct };
+  }, [und, spot, ivF, ivB, iv0, vix, capital, popT]);
 
   const regimeColor = { LOW: C.vega, NORMAL: C.income, ELEVATED: C.warn, HIGH: C.risk }[out.regime.vol];
   const targetWeekly$ = capital * (yieldT / 100);
-  const stratColor = (k: string) => (k === 'dc' || k === 'dd' ? C.vega : C.income);
+  // amber = 0DTE, teal = calendars/diagonals, green = weekly verticals
+  const stratColor = (st: ScoredStrategy) => st.bucket === '0DTE' ? C.warn : (st.key === 'dc' || st.key === 'dd' ? C.vega : C.income);
+  const visible = out.strategies.filter((st) => view === 'ALL' || st.bucket === view);
 
   return (
     <div className="page-wrap">
@@ -491,10 +649,13 @@ export function SPXIncomeEngine() {
             <Field label="VIX" value={vix} onChange={setVix} step={0.1} />
             <Field label="Front IV (7 DTE)" suffix="%" value={ivF} onChange={setIvF} step={0.1} />
             <Field label="Back IV (14 DTE)" suffix="%" value={ivB} onChange={setIvB} step={0.1} />
+            <Field label="0DTE IV" suffix="%" value={iv0} onChange={setIv0} step={0.1} />
           </div>
           <div style={{ display: 'grid', gap: 12 }}>
             <Slider label="Capital deployed" value={capital} onChange={setCapital} min={2000} max={100000} step={1000} display={fmt$(capital)} />
+            <Slider label="Target daily yield" value={+(yieldT / 5).toFixed(2)} onChange={(v) => setYieldT(+(v * 5).toFixed(2))} min={0.04} max={0.5} step={0.02} display={(yieldT / 5).toFixed(2) + '% · ' + fmt$(targetWeekly$ / 5) + '/day'} />
             <Slider label="Target weekly yield" value={yieldT} onChange={setYieldT} min={0.2} max={2.5} step={0.1} display={yieldT.toFixed(1) + '% · ' + fmt$(targetWeekly$) + '/wk'} />
+            <div style={{ fontSize: 10, color: C.faint, fontFamily: mono, marginTop: -6 }}>Daily and weekly targets are linked at 5 trading days.</div>
             <Slider label="Target POP" value={popT} onChange={setPopT} min={55} max={92} step={1} display={popT + '%'} />
           </div>
         </div>
@@ -515,6 +676,10 @@ export function SPXIncomeEngine() {
             <div style={{ fontSize: 9, letterSpacing: '0.1em', color: C.faint }}>1σ EXP. MOVE (7D)</div>
             <div style={{ fontFamily: mono, fontSize: 15, color: C.text }}>±{out.em.toFixed(0)} <span style={{ color: C.dim, fontSize: 12 }}>({fmtPct(out.em / spot)})</span></div>
           </div>
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: '0.1em', color: C.faint }}>1σ EXP. MOVE (0DTE)</div>
+            <div style={{ fontFamily: mono, fontSize: 15, color: C.text }}>±{out.em0.toFixed(0)} <span style={{ color: C.dim, fontSize: 12 }}>({fmtPct(out.em0 / spot)})</span></div>
+          </div>
           {vix > 30 && (
             <div style={{ fontFamily: mono, fontSize: 12, color: C.risk, border: `1px solid ${C.risk}`, borderRadius: 6, padding: '4px 8px' }}>
               GOVERNOR: VIX &gt; 30 → halve size or stand down
@@ -522,13 +687,25 @@ export function SPXIncomeEngine() {
           )}
         </div>
 
+        {/* Bucket filter tabs */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          {([['ALL', 'All structures'], ['WEEKLY', 'Weekly 7/14 DTE'], ['0DTE', '0 DTE']] as const).map(([v, label]) => (
+            <button key={v} onClick={() => setView(v)}
+              style={{
+                flex: 1, padding: '7px 0', borderRadius: 6, fontFamily: mono, fontSize: 12, cursor: 'pointer',
+                background: view === v ? 'var(--accent)' : 'transparent', color: view === v ? '#fff' : C.dim,
+                border: `1px solid ${view === v ? 'var(--accent)' : C.line}`, fontWeight: 600,
+              }}>{label}</button>
+          ))}
+        </div>
+
         {/* Strategy cards */}
-        {out.strategies.map((st, idx) => {
+        {visible.map((st, idx) => {
           const deployed = st.contracts * st.maxRisk;
           const yieldOnCap = capital > 0 ? st.evWeekly / capital : 0;
           const meets = st.evWeekly >= targetWeekly$;
           const standDown = st.score < 42;
-          const col = stratColor(st.key);
+          const col = stratColor(st);
           return (
             <div key={st.key} style={{
               background: C.panel, border: `1px solid ${idx === 0 ? col : C.line}`, borderRadius: 10,
@@ -569,6 +746,7 @@ export function SPXIncomeEngine() {
                 <Stat label="POP (model)" value={fmtPct(st.popFinal, 0)} />
                 <Stat label="Contracts" value={st.contracts > 0 ? st.contracts + '×' : '0 — use XSP'} color={st.contracts === 0 ? C.warn : C.text} />
                 <Stat label="Capital at risk" value={fmt$(deployed)} />
+                <Stat label="Est. EV / day" value={fmt$(st.evWeekly / 5)} color={meets ? C.income : C.warn} />
                 <Stat label="Est. EV / week" value={`${fmt$(st.evWeekly)} (${fmtPct(yieldOnCap)})`} color={meets ? C.income : C.warn} />
               </div>
               {!meets && !standDown && (
@@ -580,7 +758,9 @@ export function SPXIncomeEngine() {
               {/* payoff */}
               <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: '6px 6px 2px', marginBottom: 10 }}>
                 <PayoffChart grid={out.grid} pl={st.pl} spot={spot} color={col} />
-                <div style={{ fontSize: 9, color: C.faint, fontFamily: mono, padding: '0 4px 4px' }}>P&L per contract at short-leg expiry {st.breakevens ? `· BE ${st.breakevens.map((b) => b.toFixed(0)).join(' / ')}` : '· vega held constant'}</div>
+                <div style={{ fontSize: 9, color: C.faint, fontFamily: mono, padding: '0 4px 4px' }}>
+                  P&L per contract {st.bucket === '0DTE' ? "at today's close" : 'at short-leg expiry'} {st.breakevens ? `· BE ${st.breakevens.map((b) => b.toFixed(0)).join(' / ')}` : '· vega held constant'}{st.bucket === '0DTE' ? ' · EV/week = 5 daily entries' : ''}
+                </div>
               </div>
 
               {/* rules */}
@@ -597,6 +777,7 @@ export function SPXIncomeEngine() {
 
         <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.6, fontFamily: mono }}>
           Model uses Black-Scholes with flat IV per expiry and r = 4%. Credits/debits are mid-price estimates — verify against live chains before sizing.
+          0DTE EV figures carry a {Math.round((1 - FRICTION_0DTE) * 100)}% friction haircut (gamma slippage + fills) and assume 5 daily entries per week.
           Live fetch uses CBOE delayed quotes (~15 min): SPX spot, VIX, and VIX9D as the front-IV proxy.
           Deploy at most ~20–25% of the account's option sleeve per week; the compounding comes from the weeks you don't blow up.
           Not financial advice — a sizing and structure-selection instrument.
