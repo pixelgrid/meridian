@@ -43,6 +43,7 @@ import { CalendarSpreads } from './pages/CalendarSpreads';
 import { StrategyBuilder } from './pages/StrategyBuilder';
 import { StrategyIntents } from './pages/StrategyIntents';
 import { SPXIncomeEngine } from './pages/SPXIncomeEngine';
+import { RatioSpreads } from './pages/RatioSpreads';
 
 export default function App() {
   return (
@@ -92,6 +93,7 @@ export default function App() {
         <Route path="/strategy-builder" element={<StrategyBuilder />} />
         <Route path="/strategy-intents" element={<StrategyIntents />} />
         <Route path="/spx-income-engine" element={<SPXIncomeEngine />} />
+        <Route path="/ratio-spreads" element={<RatioSpreads />} />
       </Routes>
     </HashRouter>
   );
