@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { normCdf } from '../lib/blackScholes';
+import { sleep } from '../lib/avClient';
 
 /* ============ MATH CORE ============ */
 
@@ -512,6 +513,60 @@ async function cboeQuote(symbol: string): Promise<number> {
   return price;
 }
 
+/* ============ LIVE DATA: IBKR Client Portal Gateway (real-time) ============
+ * IBKR's Web API has no API keys — authentication is a login session on the
+ * locally-running Client Portal Gateway (default https://localhost:5000).
+ * The gateway URL is user-provided and persisted in localStorage.
+ */
+
+const LS_IBKR_URL = 'ibkr_gateway_url';
+const IBKR_CONID_SPX = 416904;    // CBOE S&P 500 Index
+const IBKR_CONID_VIX = 13455763;  // CBOE Volatility Index
+
+// Snapshot values can arrive prefixed (e.g. "C6200.5" = prior close, "H..." = halted)
+function ibkrNum(v: unknown): number | null {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v !== 'string') return null;
+  const n = parseFloat(v.replace(/^[A-Za-z]+/, ''));
+  return isFinite(n) && n > 0 ? n : null;
+}
+
+async function ibkrJson(base: string, path: string): Promise<unknown> {
+  const res = await fetch(base + path, { credentials: 'include' });
+  if (res.status === 401) throw new Error('session expired — log in again at the gateway URL');
+  if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
+  return res.json();
+}
+
+// Resolve an index conid by symbol (used for VIX9D / VIX1D, whose conids vary)
+async function ibkrFindIndexConid(base: string, symbol: string): Promise<number | null> {
+  try {
+    const rows = await ibkrJson(base, `/v1/api/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`) as
+      Array<{ conid?: string | number; symbol?: string; sections?: { secType: string }[] }>;
+    const hit = rows.find(r => r.symbol === symbol && (r.sections ?? []).some(s => s.secType === 'IND'))
+      ?? rows.find(r => (r.sections ?? []).some(s => s.secType === 'IND'));
+    const conid = typeof hit?.conid === 'string' ? parseInt(hit.conid, 10) : hit?.conid;
+    return conid && isFinite(conid) ? conid : null;
+  } catch {
+    return null;
+  }
+}
+
+// Field 31 = last price. The first snapshot call primes the gateway's
+// subscriptions and often returns no prices — call, wait, call again.
+async function ibkrSnapshot(base: string, conids: number[]): Promise<Record<number, number | null>> {
+  const path = `/v1/api/iserver/marketdata/snapshot?conids=${conids.join(',')}&fields=31`;
+  await ibkrJson(base, path);
+  await sleep(900);
+  const rows = await ibkrJson(base, path) as Array<Record<string, unknown>>;
+  const out: Record<number, number | null> = {};
+  for (const row of rows) {
+    const conid = typeof row.conid === 'number' ? row.conid : parseInt(String(row.conid), 10);
+    if (isFinite(conid)) out[conid] = ibkrNum(row['31']);
+  }
+  return out;
+}
+
 /* ============ MAIN ============ */
 
 export function SPXIncomeEngine() {
@@ -528,30 +583,84 @@ export function SPXIncomeEngine() {
 
   const [fetching, setFetching] = useState(false);
   const [fetchMsg, setFetchMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [ibkrUrl, setIbkrUrl] = useState(() => localStorage.getItem(LS_IBKR_URL) ?? '');
+
+  // Apply a fetched quote set to the inputs. Front IV ≈ VIX9D (9-day ATM IV,
+  // closest listed proxy for 7 DTE); back IV (14d) interpolated VIX9D→VIX
+  // (30d); 0DTE IV ≈ VIX1D when available.
+  function applyQuotes(spx: number, vixQ: number, vix9d: number | null, vix1d: number | null) {
+    setSpot(und === 'XSP' ? Math.round(spx / 10) : Math.round(spx));
+    setVix(+vixQ.toFixed(2));
+    if (vix9d != null) {
+      setIvF(+vix9d.toFixed(1));
+      setIvB(+(vix9d + (vixQ - vix9d) * ((14 - 9) / (30 - 9))).toFixed(1));
+    }
+    if (vix1d != null) setIv0(+vix1d.toFixed(1));
+  }
 
   async function fetchLive() {
     setFetching(true);
     setFetchMsg(null);
     try {
-      const [spx, vixQ, vix9d] = await Promise.all([
+      const [spx, vixQ, vix9d, vix1d] = await Promise.all([
         cboeQuote('_SPX'), cboeQuote('_VIX'), cboeQuote('_VIX9D'),
+        cboeQuote('_VIX1D').catch(() => null),
       ]);
-      setSpot(und === 'XSP' ? Math.round(spx / 10) : Math.round(spx));
-      setVix(+vixQ.toFixed(2));
-      // VIX9D ≈ 9-day ATM IV → proxy for 7-DTE front IV.
-      // Back IV (14d) interpolated between VIX9D (9d) and VIX (30d).
-      const front = vix9d;
-      const back = vix9d + (vixQ - vix9d) * ((14 - 9) / (30 - 9));
-      setIvF(+front.toFixed(1));
-      setIvB(+back.toFixed(1));
+      applyQuotes(spx, vixQ, vix9d, vix1d);
       setFetchMsg({
         ok: true,
-        text: `Updated ${new Date().toLocaleTimeString()} — CBOE delayed quotes (~15 min). Front IV ≈ VIX9D; back IV interpolated VIX9D→VIX. Verify against the live chain before trading.`,
+        text: `Updated ${new Date().toLocaleTimeString()} — CBOE delayed quotes (~15 min). Front IV ≈ VIX9D; back IV interpolated VIX9D→VIX${vix1d != null ? '; 0DTE IV ≈ VIX1D' : ''}. Verify against the live chain before trading.`,
       });
     } catch (e) {
       setFetchMsg({
         ok: false,
         text: `Fetch failed (${e instanceof Error ? e.message : String(e)}) — enter values manually or try again later.`,
+      });
+    } finally {
+      setFetching(false);
+    }
+  }
+
+  function saveIbkrUrl(v: string) {
+    setIbkrUrl(v);
+    localStorage.setItem(LS_IBKR_URL, v);
+  }
+
+  async function fetchIbkr() {
+    const base = ibkrUrl.trim().replace(/\/+$/, '');
+    if (!base) {
+      setFetchMsg({ ok: false, text: 'Enter your IBKR Client Portal Gateway URL first (e.g. https://localhost:5000) — see setup steps below.' });
+      return;
+    }
+    setFetching(true);
+    setFetchMsg(null);
+    try {
+      // Session check — fails fast if the gateway is down or not logged in
+      await ibkrJson(base, '/v1/api/iserver/accounts').catch((e: unknown) => {
+        throw new Error(`gateway unreachable or not authenticated (${e instanceof Error ? e.message : e}). Open ${base} in a new tab, log in, then retry`);
+      });
+      // VIX9D / VIX1D conids vary — resolve them by symbol search (best effort)
+      const [c9d, c1d] = await Promise.all([
+        ibkrFindIndexConid(base, 'VIX9D'),
+        ibkrFindIndexConid(base, 'VIX1D'),
+      ]);
+      const conids = [IBKR_CONID_SPX, IBKR_CONID_VIX, ...(c9d ? [c9d] : []), ...(c1d ? [c1d] : [])];
+      const snap = await ibkrSnapshot(base, conids);
+      const spx = snap[IBKR_CONID_SPX];
+      const vixQ = snap[IBKR_CONID_VIX];
+      if (spx == null || vixQ == null) {
+        throw new Error('no SPX/VIX prices in snapshot — check CBOE index market-data subscriptions (or enable delayed data) in Account Management');
+      }
+      applyQuotes(spx, vixQ, c9d ? snap[c9d] : null, c1d ? snap[c1d] : null);
+      const missing = [!c9d || snap[c9d] == null ? 'VIX9D (front/back IV left unchanged)' : '', !c1d || snap[c1d] == null ? 'VIX1D (0DTE IV left unchanged)' : ''].filter(Boolean);
+      setFetchMsg({
+        ok: true,
+        text: `Updated ${new Date().toLocaleTimeString()} — IBKR Client Portal Gateway (real-time if subscribed, else delayed).${missing.length ? ' Unavailable: ' + missing.join(', ') + '.' : ''} Verify against the live chain before trading.`,
+      });
+    } catch (e) {
+      setFetchMsg({
+        ok: false,
+        text: `IBKR fetch failed: ${e instanceof Error ? e.message : String(e)}`,
       });
     } finally {
       setFetching(false);
@@ -633,9 +742,41 @@ export function SPXIncomeEngine() {
                 cursor: fetching ? 'wait' : 'pointer', opacity: fetching ? 0.6 : 1,
                 background: 'transparent', color: C.vega, border: `1px solid ${C.vega}`,
               }}>
-              {fetching ? '⟳ Fetching…' : '⟳ Fetch live data (15-min delayed)'}
+              {fetching ? '⟳ Fetching…' : '⟳ Fetch delayed (CBOE, 15 min)'}
             </button>
           </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+            <input
+              type="text" value={ibkrUrl} onChange={(e) => saveIbkrUrl(e.target.value)}
+              placeholder="IBKR CP Gateway URL — e.g. https://localhost:5000"
+              spellCheck={false}
+              style={{
+                flex: '2 1 260px', background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6,
+                color: C.text, fontFamily: mono, fontSize: 12, padding: '7px 10px', outline: 'none',
+              }}
+            />
+            <button onClick={fetchIbkr} disabled={fetching}
+              style={{
+                flex: '1 1 180px', padding: '7px 0', borderRadius: 6, fontFamily: mono, fontSize: 12, fontWeight: 600,
+                cursor: fetching ? 'wait' : 'pointer', opacity: fetching ? 0.6 : 1,
+                background: 'transparent', color: C.accent, border: `1px solid ${C.accent}`,
+              }}>
+              {fetching ? '⟳ Fetching…' : '⚡ Fetch via IBKR (real-time)'}
+            </button>
+          </div>
+          <details style={{ marginBottom: 12 }}>
+            <summary style={{ fontSize: 11, color: C.dim, fontFamily: mono, cursor: 'pointer' }}>
+              How to set up the IBKR connection (no API key — a local gateway login)
+            </summary>
+            <ol style={{ fontSize: 11, color: C.dim, lineHeight: 1.7, margin: '8px 0 0', paddingLeft: 18 }}>
+              <li>Install a Java runtime (Java 8+), then download IBKR's <strong>Client Portal Gateway</strong>: <span style={{ fontFamily: mono }}>download2.interactivebrokers.com/portal/clientportal.gw.zip</span> and unzip it.</li>
+              <li>Edit <span style={{ fontFamily: mono }}>root/conf.yaml</span> → under <span style={{ fontFamily: mono }}>cors:</span> set <span style={{ fontFamily: mono }}>origin.allowed</span> to this site's origin (e.g. <span style={{ fontFamily: mono }}>{window.location.origin}</span>) and <span style={{ fontFamily: mono }}>allowCredentials: true</span>.</li>
+              <li>Start it: <span style={{ fontFamily: mono }}>bin/run.sh root/conf.yaml</span> (macOS/Linux) or <span style={{ fontFamily: mono }}>bin\run.bat root\conf.yaml</span> (Windows).</li>
+              <li>Open <span style={{ fontFamily: mono }}>https://localhost:5000</span> in this browser, accept the self-signed certificate warning, and log in with your IBKR credentials until you see "Client login succeeds".</li>
+              <li>Paste the gateway URL above (it is saved in this browser's localStorage) and click <strong>Fetch via IBKR</strong>. Real-time values require CBOE index market-data subscriptions on your account; otherwise enable delayed data in Account Management.</li>
+              <li>The gateway session expires after inactivity — if a fetch fails with an auth error, re-open the gateway tab and log in again.</li>
+            </ol>
+          </details>
           {fetchMsg && (
             <div style={{
               fontSize: 11, fontFamily: mono, lineHeight: 1.5, marginBottom: 12, padding: '6px 10px', borderRadius: 6,
